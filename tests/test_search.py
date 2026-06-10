@@ -25,7 +25,7 @@ class WebSearchClientTests(unittest.TestCase):
         bing_html.assert_not_called()
 
     def test_tries_public_search_fallbacks_when_first_provider_fails(self):
-        client = WebSearchClient()
+        client = WebSearchClient(allow_public_fallback=True)
 
         with (
             patch.dict("os.environ", {}, clear=True),
@@ -41,7 +41,7 @@ class WebSearchClientTests(unittest.TestCase):
         self.assertEqual(results, [EvidenceItem("Title", "https://example.com", "Snippet")])
 
     def test_returns_empty_results_when_all_search_providers_fail(self):
-        client = WebSearchClient()
+        client = WebSearchClient(allow_public_fallback=True)
 
         with (
             patch.dict("os.environ", {}, clear=True),
@@ -51,6 +51,20 @@ class WebSearchClientTests(unittest.TestCase):
             results = client.search("Example Account", limit=3)
 
         self.assertEqual(results, [])
+
+    def test_returns_empty_results_without_api_keys_by_default(self):
+        client = WebSearchClient()
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(client, "_search_bing_html") as bing_html,
+            patch.object(client, "_search_duckduckgo") as duckduckgo,
+        ):
+            results = client.search("Example Account", limit=3)
+
+        self.assertEqual(results, [])
+        bing_html.assert_not_called()
+        duckduckgo.assert_not_called()
 
 
 if __name__ == "__main__":

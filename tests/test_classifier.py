@@ -67,20 +67,24 @@ class LlmEvidenceClassifierTests(unittest.TestCase):
         self.assertEqual(result.evidence_urls, ["https://example.com/profile"])
         self.assertEqual(search.queries, [("Example Energy account ownership organization type", 5)])
 
-    def test_marks_needs_review_when_no_evidence_is_found(self):
-        result = LlmEvidenceClassifier(FakeSearchClient([]), FakeLlmClient({})).classify(
-            "Unknown Account"
+    def test_uses_llm_fallback_when_no_evidence_is_found(self):
+        llm = FakeLlmClient(
+            {
+                "account_types": ["Multinational Corporation(MNC)"],
+                "confidence": "Medium",
+                "reason": "Mitsui is generally known as a diversified international trading company.",
+            }
         )
 
-        self.assertEqual(
-            result,
-            AccountClassification(
-                account_types=["Needs Review"],
-                confidence="Low",
-                reason="No public evidence was found for this account.",
-                evidence_urls=[],
-            ),
+        result = LlmEvidenceClassifier(FakeSearchClient([]), llm).classify(
+            "Mitsui & Co., Ltd."
         )
+
+        self.assertEqual(result.account_types, ["Multinational Corporation(MNC)"])
+        self.assertEqual(result.confidence, "Medium")
+        self.assertIn("LLM fallback - no public evidence found", result.reason)
+        self.assertEqual(result.evidence_urls, [])
+        self.assertEqual(llm.calls, [("Mitsui & Co., Ltd.", [])])
 
     def test_marks_needs_review_when_search_provider_rejects_request(self):
         result = LlmEvidenceClassifier(FailingSearchClient(), FakeLlmClient({})).classify(

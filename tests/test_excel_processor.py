@@ -21,6 +21,22 @@ class FakeClassifier:
         )
 
 
+class PartiallyFailingClassifier:
+    def __init__(self):
+        self.seen = []
+
+    def classify(self, account_name):
+        self.seen.append(account_name)
+        if account_name == "Public Co":
+            raise TimeoutError("LLM request timed out")
+        return AccountClassification(
+            account_types=["Multinational Corporation(MNC)"],
+            confidence="Medium",
+            reason="Fallback classification.",
+            evidence_urls=[],
+        )
+
+
 def workbook_bytes():
     workbook = Workbook()
     sheet = workbook.active
@@ -74,6 +90,30 @@ class ExcelProcessorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Account Name.*Account Type"):
             process_workbook(stream.getvalue(), FakeClassifier())
+
+    def test_classifier_failure_marks_row_needs_review_and_continues(self):
+        classifier = PartiallyFailingClassifier()
+
+        output = process_workbook(workbook_bytes(), classifier)
+
+        result = load_workbook(BytesIO(output))
+        sheet = result["Accounts"]
+        self.assertEqual(sheet.cell(2, 4).value, "Needs Review")
+        self.assertEqual(sheet.cell(2, 5).value, "Low")
+        self.assertIn("Classification failed for this account", sheet.cell(2, 6).value)
+        self.assertEqual(sheet.cell(3, 4).value, "Private Enterprise(POE)")
+
+    def test_progress_callback_reports_public_entity_progress(self):
+        events = []
+
+        process_workbook(workbook_bytes(), FakeClassifier(), progress_callback=events.append)
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["processed"], 0)
+        self.assertEqual(events[0]["total"], 1)
+        self.assertEqual(events[1]["processed"], 1)
+        self.assertEqual(events[1]["total"], 1)
+        self.assertEqual(events[1]["current_account"], "Public Co")
 
 
 if __name__ == "__main__":

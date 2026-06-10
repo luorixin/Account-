@@ -61,13 +61,13 @@ class LlmEvidenceClassifier:
                 evidence_urls=[],
             )
         if not evidence:
-            return AccountClassification(
-                account_types=["Needs Review"],
-                confidence="Low",
-                reason="No public evidence was found for this account.",
-                evidence_urls=[],
-            )
+            return self._classify_with_llm(account_name, [])
 
+        return self._classify_with_llm(account_name, evidence)
+
+    def _classify_with_llm(
+        self, account_name: str, evidence: list[EvidenceItem]
+    ) -> AccountClassification:
         raw = self.llm_client.classify(account_name, evidence)
         valid_types = [item for item in raw.get("account_types", []) if item in VALID_ACCOUNT_TYPES]
         if not valid_types:
@@ -78,6 +78,10 @@ class LlmEvidenceClassifier:
             confidence = "Low"
 
         reason = str(raw.get("reason") or "LLM did not return a usable reason.").strip()
+        if not evidence:
+            if confidence == "High":
+                confidence = "Medium"
+            reason = f"LLM fallback - no public evidence found. {reason}"
         evidence_urls = [item.url for item in evidence if item.url]
 
         return AccountClassification(
@@ -94,7 +98,7 @@ class OpenAICompatibleLlmClient:
         api_key: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
-        timeout_seconds: int = 60,
+        timeout_seconds: int = 25,
     ):
         self.api_key = (
             api_key
@@ -125,13 +129,16 @@ class OpenAICompatibleLlmClient:
                 {
                     "role": "system",
                     "content": (
-                        "You classify account organizations using only supplied public evidence. "
+                        "You classify account organizations. If evidence is supplied, use only that evidence. "
+                        "If evidence is empty, use general business knowledge and the account name, "
+                        "but do not claim that public evidence was found. "
                         "Return strict JSON with account_types, confidence, and reason. "
                         "account_types must be an array using only these labels: "
                         + ", ".join(VALID_ACCOUNT_TYPES)
                         + ". Use multiple labels only when evidence supports each. "
                         "Use Other when evidence shows none of the listed types. "
-                        "Use confidence as High, Medium, or Low."
+                        "Use confidence as High, Medium, or Low. "
+                        "When evidence is empty, do not use High confidence unless the name itself strongly indicates the type."
                     ),
                 },
                 {

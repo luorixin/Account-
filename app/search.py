@@ -11,16 +11,21 @@ import urllib.request
 from app.classifier import EvidenceItem
 
 
+SEARCH_TIMEOUT_SECONDS = 10
+
+
 class WebSearchClient:
     def __init__(
         self,
         tavily_api_key: str | None = None,
         serpapi_api_key: str | None = None,
         bing_search_api_key: str | None = None,
+        allow_public_fallback: bool = False,
     ):
         self.tavily_api_key = tavily_api_key or os.getenv("TAVILY_API_KEY")
         self.serpapi_api_key = serpapi_api_key or os.getenv("SERPAPI_API_KEY")
         self.bing_search_api_key = bing_search_api_key or os.getenv("BING_SEARCH_API_KEY")
+        self.allow_public_fallback = allow_public_fallback
 
     def search(self, query: str, limit: int = 5) -> list[EvidenceItem]:
         providers = []
@@ -30,7 +35,8 @@ class WebSearchClient:
             providers.append(self._search_serpapi)
         if self.bing_search_api_key:
             providers.append(self._search_bing)
-        providers.extend([self._search_bing_html, self._search_duckduckgo])
+        if self.allow_public_fallback:
+            providers.extend([self._search_bing_html, self._search_duckduckgo])
 
         for provider in providers:
             try:
@@ -83,7 +89,7 @@ class WebSearchClient:
             f"https://api.bing.microsoft.com/v7.0/search?{params}",
             headers={"Ocp-Apim-Subscription-Key": self.bing_search_api_key},
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read().decode("utf-8"))
         return [
             EvidenceItem(
@@ -107,7 +113,7 @@ class WebSearchClient:
                 "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
             },
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
             text = response.read().decode("utf-8", errors="replace")
         results = []
         pattern = re.compile(
@@ -133,7 +139,7 @@ class WebSearchClient:
             f"https://duckduckgo.com/html/?{params}",
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
             text = response.read().decode("utf-8", errors="replace")
         results = []
         pattern = re.compile(
@@ -165,12 +171,12 @@ def _post_json(url: str, payload: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as response:
+    with urllib.request.urlopen(url, timeout=SEARCH_TIMEOUT_SECONDS) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
