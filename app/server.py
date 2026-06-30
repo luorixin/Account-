@@ -1,3 +1,17 @@
+"""
+Web 服务器模块 (app.server)
+
+基于 Python 内置的 http.server 实现轻量级本地 Web API 及嵌入式网页 UI。
+核心职责：
+- 提供前端网页访问接口；
+- 提供文件上传与分类清洗任务创建接口 (/process)；
+- 提供异步任务进度轮询接口 (/status)；
+- 提供处理完成文件的下载接口 (/download)；
+- 新增：提供历史任务拉取接口 (/history)；
+- 新增：提供任务行明细结果获取接口 (/job/results)；
+- 新增：提供人工修正与复核更新接口 (/job/update_result)。
+"""
+
 from __future__ import annotations
 
 from http import HTTPStatus
@@ -5,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 import traceback
 import urllib.parse
@@ -14,41 +29,85 @@ from app.jobs import JobManager
 from app.search import WebSearchClient
 
 
+# 限制单个上传文件的大小最大为 25 MB
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+EDITABLE_ACCOUNT_TYPES = {
+    "State-owned Enterprise(SOE)",
+    "Multinational Corporation(MNC)",
+    "Private Enterprise(POE)",
+    "Other",
+}
+EDITABLE_REVIEW_STATUSES = {"", "Needs Review"}
 
 
 class AccountToolHandler(BaseHTTPRequestHandler):
-    server_version = "AccountTypeTool/1.1"
+    """
+    HTTP 请求处理器，处理所有的 Web 页面请求和任务 API。
+    通过扩展 BaseHTTPRequestHandler 并配合 ThreadingHTTPServer 支持多线程并发请求。
+    """
+    server_version = "AccountTypeTool/1.2"
 
     def do_GET(self):
+        """
+        处理 GET 请求，路由包括主页、查询状态、下载结果等。
+        """
         path = urllib.parse.urlparse(self.path).path
         if path == "/":
+            # 返回前端主页面
             self._send_bytes(_index_html().encode("utf-8"), "text/html; charset=utf-8")
             return
         if path == "/status":
+            # 查询任务处理状态和进度进度
             self._handle_status()
             return
         if path == "/download":
+            # 下载处理完成后的 Excel 文件
             self._handle_download()
+            return
+        if path == "/history":
+            # 新增：获取历史任务列表
+            self._handle_history()
+            return
+        if path == "/job/results":
+            # 新增：获取明细行结果
+            self._handle_job_results()
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
-        if urllib.parse.urlparse(self.path).path != "/process":
+        """
+        处理 POST 请求，核心入口为 /process 上传文件并提交异步处理任务。
+        以及 /job/update_result 用户在线修改结果。
+        """
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/process":
+            self._handle_process()
+        elif path == "/job/update_result":
+            self._handle_update_result()
+        else:
             self.send_error(HTTPStatus.NOT_FOUND)
-            return
 
-        length = int(self.headers.get("Content-Length", "0"))
+    def _handle_process(self):
+        """
+        处理上传文件并提交处理任务。
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json_error("Invalid Content-Length.", 400)
+            return
         if length <= 0 or length > MAX_UPLOAD_BYTES:
             self._send_json_error("Upload must be a non-empty Excel file smaller than 25MB.", 400)
             return
 
+        # 提取上传时的原始文件名，处理非 ASCII 字符转义
         filename = urllib.parse.unquote(self.headers.get("X-Filename", "accounts.xlsx"))
         if not filename.lower().endswith((".xlsx", ".xlsm")):
             self._send_json_error("Only .xlsx and .xlsm files are supported.", 400)
             return
 
         try:
+            # 异步创建并启动清洗任务，将 API Key 局限在请求生命周期内（不写回文件）
             job_id = self.server.job_manager.create_job(
                 self.rfile.read(length),
                 filename=filename,
@@ -60,10 +119,63 @@ class AccountToolHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._send_json_error(str(exc), 500)
 
+    def _handle_update_result(self):
+        """
+        新增：网页端人工修改某一行分类结果的回调接口。
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8")
+            data = json.loads(body)
+        except Exception as exc:
+            self._send_json_error(f"Invalid request body: {exc}", 400)
+            return
+
+        job_id = data.get("job_id")
+        row_index = data.get("row_index")
+        new_account_type = data.get("new_account_type")
+        review_status = data.get("review_status", "")
+        reason = data.get("reason", "")
+
+        if not job_id or row_index is None or not new_account_type:
+            self._send_json_error("Missing job_id, row_index, or new_account_type.", 400)
+            return
+        if new_account_type not in EDITABLE_ACCOUNT_TYPES:
+            self._send_json_error("Invalid new_account_type.", 400)
+            return
+        if review_status not in EDITABLE_REVIEW_STATUSES:
+            self._send_json_error("Invalid review_status.", 400)
+            return
+
+        from app.db import update_row_classification_in_db
+        try:
+            # 更新指定行，并更新全局持久化文件字节
+            counts = update_row_classification_in_db(
+                job_id=job_id,
+                row_index=int(row_index),
+                new_account_type=new_account_type,
+                review_status=review_status,
+                reason=reason
+            )
+            self._send_json({
+                "success": True,
+                "success_count": counts["success_count"],
+                "needs_review_count": counts["needs_review_count"],
+                "failure_count": counts["failure_count"]
+            })
+        except Exception as exc:
+            self._send_json_error(str(exc), 500)
+
     def log_message(self, fmt, *args):
+        """
+        重写日志输出，使用标准错误流输出。
+        """
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def _handle_status(self):
+        """
+        提取查询参数 job_id，获取任务当前的状态。
+        """
         job_id = _query_param(self.path, "job_id")
         if not job_id:
             self._send_json_error("Missing job_id.", 400)
@@ -73,7 +185,36 @@ class AccountToolHandler(BaseHTTPRequestHandler):
         except KeyError as exc:
             self._send_json_error(str(exc), 404)
 
+    def _handle_history(self):
+        """
+        新增：获取历史任务列表。
+        """
+        from app.db import list_jobs_from_db
+        try:
+            jobs = list_jobs_from_db()
+            self._send_json(jobs)
+        except Exception as exc:
+            self._send_json_error(str(exc), 500)
+
+    def _handle_job_results(self):
+        """
+        新增：获取任务的明细行结果。
+        """
+        job_id = _query_param(self.path, "job_id")
+        if not job_id:
+            self._send_json_error("Missing job_id.", 400)
+            return
+        from app.db import get_job_results_from_db
+        try:
+            results = get_job_results_from_db(job_id)
+            self._send_json(results)
+        except Exception as exc:
+            self._send_json_error(str(exc), 500)
+
     def _handle_download(self):
+        """
+        获取处理好的 Excel 字节流以进行文件附件下载。
+        """
         job_id = _query_param(self.path, "job_id")
         if not job_id:
             self._send_json_error("Missing job_id.", 400)
@@ -84,6 +225,7 @@ class AccountToolHandler(BaseHTTPRequestHandler):
             self._send_json_error(str(exc), 404)
             return
         except ValueError as exc:
+            # 文件尚未处理完毕
             self._send_json_error(str(exc), 409)
             return
 
@@ -101,6 +243,9 @@ class AccountToolHandler(BaseHTTPRequestHandler):
         self.wfile.write(output)
 
     def _send_json(self, payload: dict, status: int = 200):
+        """
+        向客户端返回 JSON 格式响应。
+        """
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -109,9 +254,15 @@ class AccountToolHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_json_error(self, message: str, status: int):
+        """
+        向客户端返回格式化的 JSON 错误信息。
+        """
         self._send_json({"error": message}, status)
 
     def _send_bytes(self, body: bytes, content_type: str):
+        """
+        向客户端发送指定 Content-Type 的二进制字节流（如 HTML 页面）。
+        """
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -120,12 +271,18 @@ class AccountToolHandler(BaseHTTPRequestHandler):
 
 
 def create_server(host: str, port: int, job_manager: JobManager | None = None):
+    """
+    构建并返回一个基于多线程的 HTTP 服务器实例。
+    """
     server = ThreadingHTTPServer((host, port), AccountToolHandler)
     server.job_manager = job_manager or JobManager(_build_classifier)
     return server
 
 
 def run(host: str = "127.0.0.1", port: int = 8000):
+    """
+    服务器的启动运行主入口。
+    """
     server = create_server(host, port)
     print(f"Account Type tool is running at http://{host}:{port}")
     print("Use the web page API key field, or set DEEPSEEK_API_KEY before processing files.")
@@ -133,244 +290,39 @@ def run(host: str = "127.0.0.1", port: int = 8000):
 
 
 def _build_classifier(llm_api_key: str | None = None, tavily_api_key: str | None = None):
+    """
+    根据请求中的 API Key 分别实例化搜索引擎客户端与 LLM 客户端，最终生成分类器实例。
+    """
     return LlmEvidenceClassifier(
         WebSearchClient(
             tavily_api_key=tavily_api_key,
-            allow_public_fallback=True,
+            allow_public_fallback=True, # 允许没有 Tavily 密匙时自动使用国内各大公开搜索引擎
         ),
         OpenAICompatibleLlmClient(api_key=llm_api_key),
     )
 
 
 def _query_param(path: str, name: str) -> str:
+    """
+    简易解析 GET 查询 URL 中的单个 Query 参数值。
+    """
     parsed = urllib.parse.urlparse(path)
     return urllib.parse.parse_qs(parsed.query).get(name, [""])[0]
 
 
 def _index_html() -> str:
-    return """<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Account Type 清洗工具</title>
-  <style>
-    :root {
-      color-scheme: light;
-      font-family: Arial, "Microsoft YaHei", sans-serif;
-      background: #f7f8fb;
-      color: #1f2937;
-    }
-    body { margin: 0; }
-    main {
-      max-width: 760px;
-      margin: 56px auto;
-      padding: 0 24px;
-    }
-    h1 {
-      font-size: 28px;
-      margin: 0 0 12px;
-    }
-    p {
-      margin: 0 0 22px;
-      line-height: 1.6;
-      color: #4b5563;
-    }
-    .panel {
-      background: #ffffff;
-      border: 1px solid #d9dee8;
-      border-radius: 8px;
-      padding: 24px;
-      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
-    }
-    label {
-      display: block;
-      font-size: 14px;
-      font-weight: 700;
-      margin-bottom: 10px;
-    }
-    input[type=file],
-    input[type=password] {
-      display: block;
-      width: 100%;
-      box-sizing: border-box;
-      padding: 12px 14px;
-      border: 1px solid #c7cedb;
-      border-radius: 6px;
-      margin-bottom: 18px;
-      font-size: 14px;
-      background: #ffffff;
-    }
-    input[type=file] {
-      padding: 14px;
-      border-style: dashed;
-      background: #fbfcff;
-    }
-    button, a.button {
-      display: inline-flex;
-      align-items: center;
-      min-height: 42px;
-      padding: 0 18px;
-      border: 0;
-      border-radius: 6px;
-      background: #2563eb;
-      color: white;
-      font-weight: 700;
-      cursor: pointer;
-      text-decoration: none;
-      font-size: 14px;
-    }
-    button:disabled {
-      background: #9aa4b2;
-      cursor: not-allowed;
-    }
-    #status {
-      margin-top: 16px;
-      min-height: 24px;
-      font-size: 14px;
-      color: #374151;
-      white-space: pre-wrap;
-      line-height: 1.6;
-    }
-    .error { color: #b91c1c; }
-    .progress {
-      margin-top: 16px;
-      width: 100%;
-      height: 10px;
-      border-radius: 999px;
-      background: #e5e7eb;
-      overflow: hidden;
-    }
-    .bar {
-      height: 100%;
-      width: 0%;
-      background: #2563eb;
-      transition: width 150ms ease;
-    }
-    .hidden { display: none; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>Account Type 清洗工具</h1>
-    <p>上传包含 Account Name 和 Account Type 的 Excel。工具会联网检索 Public Entity、Private Equity、Private Equity Investee 或 Account Type 为空白账号的公开信息，并调用 DeepSeek 输出新分类、置信度、原因和证据链接；其他已有 Account Type 会按内置规则本地标准化。未配置或无法使用搜索 API 时，会尝试百度、搜狗、360 的公开网页搜索。</p>
-    <section class="panel">
-      <label for="apiKey">DeepSeek API Key（仅本次请求使用，不保存）</label>
-      <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
-      <label for="tavilyKey">Tavily Search API Key（可选，用于更稳定的联网检索；失败时会继续尝试国内公开搜索）</label>
-      <input id="tavilyKey" type="password" autocomplete="off" placeholder="tvly-...">
-      <label for="file">选择 Excel 文件（.xlsx / .xlsm）</label>
-      <input id="file" type="file" accept=".xlsx,.xlsm">
-      <button id="submit">处理</button>
-      <a id="download" class="button hidden" href="#">下载结果</a>
-      <div class="progress"><div id="bar" class="bar"></div></div>
-      <div id="status"></div>
-    </section>
-  </main>
-  <script>
-    const fileInput = document.getElementById("file");
-    const apiKeyInput = document.getElementById("apiKey");
-    const tavilyKeyInput = document.getElementById("tavilyKey");
-    const submit = document.getElementById("submit");
-    const download = document.getElementById("download");
-    const status = document.getElementById("status");
-    const bar = document.getElementById("bar");
-    let pollTimer = null;
+    """
+    从 static 目录下读取 index.html 网页文件。
+    """
+    return _static_file("index.html").read_text(encoding="utf-8")
 
-    submit.addEventListener("click", async () => {
-      const file = fileInput.files[0];
-      if (!file) {
-        setStatus("请先选择 Excel 文件。", true);
-        return;
-      }
-      const apiKey = apiKeyInput.value.trim();
-      if (!apiKey) {
-        setStatus("请先输入 DeepSeek API Key。", true);
-        return;
-      }
-      submit.disabled = true;
-      download.classList.add("hidden");
-      bar.style.width = "0%";
-      setStatus("已提交，正在创建处理任务。", false);
 
-      try {
-        const headers = {
-          "X-Filename": encodeURIComponent(file.name),
-          "X-LLM-API-Key": apiKey
-        };
-        const tavilyKey = tavilyKeyInput.value.trim();
-        if (tavilyKey) {
-          headers["X-Tavily-API-Key"] = tavilyKey;
-        }
-        const response = await fetch("/process", {
-          method: "POST",
-          headers,
-          body: await file.arrayBuffer()
-        });
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({ error: response.statusText }));
-          throw new Error(error.error || "处理失败");
-        }
-        const payload = await response.json();
-        pollStatus(payload.job_id, file.name);
-      } catch (error) {
-        submit.disabled = false;
-        setStatus(error.message, true);
-      }
-    });
+def _static_file(filename: str) -> Path:
+    """
+    获取静态资源文件相对当前脚本的完整绝对路径。
+    """
+    return Path(__file__).with_name("static") / filename
 
-    async function pollStatus(jobId, originalName) {
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(async () => {
-        try {
-          const response = await fetch(`/status?job_id=${encodeURIComponent(jobId)}`);
-          const state = await response.json();
-          if (!response.ok) throw new Error(state.error || "状态查询失败");
-          renderStatus(state);
-          if (["completed", "completed_with_errors", "failed"].includes(state.state)) {
-            clearInterval(pollTimer);
-            pollTimer = null;
-            submit.disabled = false;
-            if (state.download_ready) {
-              download.href = `/download?job_id=${encodeURIComponent(jobId)}`;
-              download.download = originalName.replace(/\\.[^.]+$/, "") + "_classified.xlsx";
-              download.classList.remove("hidden");
-            }
-          }
-        } catch (error) {
-          clearInterval(pollTimer);
-          pollTimer = null;
-          submit.disabled = false;
-          setStatus(error.message, true);
-        }
-      }, 1000);
-    }
-
-    function renderStatus(state) {
-      const total = state.total || 0;
-      const processed = state.processed || 0;
-      const percent = total ? Math.round((processed / total) * 100) : 0;
-      bar.style.width = `${percent}%`;
-      const current = state.current_account ? `\\n当前账号：${state.current_account}` : "";
-      const counts = `\\n成功：${state.success_count}  Needs Review：${state.needs_review_count}  失败：${state.failure_count}`;
-      if (state.state === "failed") {
-        setStatus(`任务失败：${state.error || "未知错误"}`, true);
-      } else if (state.state === "completed_with_errors") {
-        setStatus(`部分失败但已生成文件。已处理 ${processed}/${total}${counts}`, false);
-      } else if (state.state === "completed") {
-        setStatus(`已完成。已处理 ${processed}/${total}${counts}`, false);
-      } else {
-        setStatus(`处理中。已处理 ${processed}/${total}${current}${counts}`, false);
-      }
-    }
-
-    function setStatus(message, isError) {
-      status.textContent = message;
-      status.className = isError ? "error" : "";
-    }
-  </script>
-</body>
-</html>"""
 
 
 if __name__ == "__main__":

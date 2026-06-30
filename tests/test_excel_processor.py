@@ -94,6 +94,24 @@ def workbook_bytes():
 
 
 class ExcelProcessorTests(unittest.TestCase):
+    def setUp(self):
+        import app.db
+        app.db.DB_PATH = "test_cleanse_tool.db"
+        app.db.init_db()
+        with app.db.get_db_connection() as conn:
+            conn.execute("DELETE FROM classification_cache")
+            conn.execute("DELETE FROM job_results")
+            conn.execute("DELETE FROM jobs")
+            conn.commit()
+
+    def tearDown(self):
+        import os
+        if os.path.exists("test_cleanse_tool.db"):
+            try:
+                os.remove("test_cleanse_tool.db")
+            except OSError:
+                pass
+
     def test_processes_first_sheet_and_appends_classification_columns(self):
         classifier = FakeClassifier()
 
@@ -395,6 +413,40 @@ class ExcelProcessorTests(unittest.TestCase):
         self.assertEqual(classifier.seen, ["Duplicate Co"])
         self.assertEqual(result.active.cell(2, 3).value, "State-owned Enterprise(SOE)")
         self.assertEqual(result.active.cell(3, 3).value, "State-owned Enterprise(SOE)")
+
+    def test_reuses_existing_output_columns_when_reprocessing_workbook(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Account Name", "Account Type", *[
+            "New Account Type",
+            "Account Type Short",
+            "Review Status",
+            "Classification Confidence",
+            "Classification Reason",
+            "Evidence URLs",
+        ]])
+        sheet.append([
+            "Public Co",
+            "Public Entity",
+            "Old Type",
+            "Old Short",
+            "Old Review",
+            "Old Confidence",
+            "Old Reason",
+            "Old URL",
+        ])
+        stream = BytesIO()
+        workbook.save(stream)
+
+        output = process_workbook(stream.getvalue(), FakeClassifier())
+
+        result = load_workbook(BytesIO(output))
+        sheet = result.active
+        self.assertEqual(sheet.max_column, 8)
+        self.assertEqual(sheet.cell(1, 3).value, "New Account Type")
+        self.assertEqual(sheet.cell(2, 3).value, "State-owned Enterprise(SOE)")
+        self.assertEqual(sheet.cell(2, 4).value, "SOE")
+        self.assertEqual(sheet.cell(2, 8).value, "https://example.com/source")
 
     def test_classification_max_workers_can_force_serial_processing(self):
         workbook = Workbook()
