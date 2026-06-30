@@ -36,7 +36,13 @@ class WebSearchClient:
         if self.bing_search_api_key:
             providers.append(self._search_bing)
         if self.allow_public_fallback:
-            providers.extend([self._search_bing_html, self._search_duckduckgo])
+            providers.extend(
+                [
+                    self._search_baidu_html,
+                    self._search_sogou_html,
+                    self._search_so360_html,
+                ]
+            )
 
         for provider in providers:
             try:
@@ -100,18 +106,138 @@ class WebSearchClient:
             for item in data.get("webPages", {}).get("value", [])
         ][:limit]
 
+    def _search_baidu_html(self, query: str, limit: int) -> list[EvidenceItem]:
+        params = urllib.parse.urlencode({"wd": query})
+        request = urllib.request.Request(
+            f"https://www.baidu.com/s?{params}",
+            headers=_browser_headers(),
+        )
+        with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
+            text = response.read().decode("utf-8", errors="replace")
+
+        results = []
+        block_pattern = re.compile(
+            r'<div[^>]+(?:class="[^"]*(?:result|c-container)[^"]*"|tpl="[^"]+")[^>]*>'
+            r"(?P<block>.*?)"
+            r"(?=<div[^>]+(?:class=\"[^\"]*(?:result|c-container)[^\"]*\"|tpl=\"[^\"]+\")|</body>)",
+            re.DOTALL,
+        )
+        link_pattern = re.compile(
+            r"<h3[^>]*>.*?<a[^>]+href=\"(?P<url>[^\"]+)\"[^>]*>(?P<title>.*?)</a>",
+            re.DOTALL,
+        )
+        snippet_pattern = re.compile(
+            r'<(?:div|span|p)[^>]+class="[^"]*(?:c-abstract|content-right|c-span-last|result-op)[^"]*"[^>]*>'
+            r"(?P<snippet>.*?)"
+            r"</(?:div|span|p)>",
+            re.DOTALL,
+        )
+        for match in block_pattern.finditer(text):
+            block = match.group("block")
+            link = link_pattern.search(block)
+            if not link:
+                continue
+            snippet = snippet_pattern.search(block)
+            results.append(
+                EvidenceItem(
+                    title=_clean_html(link.group("title")),
+                    url=html.unescape(link.group("url")),
+                    snippet=_clean_html(snippet.group("snippet") if snippet else block),
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def _search_sogou_html(self, query: str, limit: int) -> list[EvidenceItem]:
+        params = urllib.parse.urlencode({"query": query})
+        request = urllib.request.Request(
+            f"https://www.sogou.com/web?{params}",
+            headers=_browser_headers(),
+        )
+        with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
+            text = response.read().decode("utf-8", errors="replace")
+        results = []
+        block_pattern = re.compile(
+            r'<div[^>]+class="[^"]*(?:vrwrap|results?)[^"]*"[^>]*>'
+            r"(?P<block>.*?)"
+            r"(?=<div[^>]+class=\"[^\"]*(?:vrwrap|results?)[^\"]*\"|</body>)",
+            re.DOTALL,
+        )
+        link_pattern = re.compile(
+            r"<h3[^>]*>.*?<a[^>]+href=\"(?P<url>[^\"]+)\"[^>]*>(?P<title>.*?)</a>",
+            re.DOTALL,
+        )
+        snippet_pattern = re.compile(
+            r'<(?:p|div)[^>]+class="[^"]*(?:str_info|ft|fz-mid|star-wiki)[^"]*"[^>]*>'
+            r"(?P<snippet>.*?)"
+            r"</(?:p|div)>",
+            re.DOTALL,
+        )
+        for match in block_pattern.finditer(text):
+            block = match.group("block")
+            link = link_pattern.search(block)
+            if not link:
+                continue
+            snippet = snippet_pattern.search(block)
+            results.append(
+                EvidenceItem(
+                    title=_clean_html(link.group("title")),
+                    url=html.unescape(link.group("url")),
+                    snippet=_clean_html(snippet.group("snippet") if snippet else block),
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def _search_so360_html(self, query: str, limit: int) -> list[EvidenceItem]:
+        params = urllib.parse.urlencode({"q": query})
+        request = urllib.request.Request(
+            f"https://www.so.com/s?{params}",
+            headers=_browser_headers(),
+        )
+        with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
+            text = response.read().decode("utf-8", errors="replace")
+        results = []
+        block_pattern = re.compile(
+            r'<li[^>]+class="[^"]*(?:res-list|result)[^"]*"[^>]*>'
+            r"(?P<block>.*?)"
+            r"(?=<li[^>]+class=\"[^\"]*(?:res-list|result)[^\"]*\"|</body>)",
+            re.DOTALL,
+        )
+        link_pattern = re.compile(
+            r"<h3[^>]*>.*?<a[^>]+href=\"(?P<url>[^\"]+)\"[^>]*>(?P<title>.*?)</a>",
+            re.DOTALL,
+        )
+        snippet_pattern = re.compile(
+            r'<(?:p|div)[^>]+class="[^"]*(?:res-desc|mh-summary|js-summary)[^"]*"[^>]*>'
+            r"(?P<snippet>.*?)"
+            r"</(?:p|div)>",
+            re.DOTALL,
+        )
+        for match in block_pattern.finditer(text):
+            block = match.group("block")
+            link = link_pattern.search(block)
+            if not link:
+                continue
+            snippet = snippet_pattern.search(block)
+            results.append(
+                EvidenceItem(
+                    title=_clean_html(link.group("title")),
+                    url=html.unescape(link.group("url")),
+                    snippet=_clean_html(snippet.group("snippet") if snippet else block),
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
+
     def _search_bing_html(self, query: str, limit: int) -> list[EvidenceItem]:
         params = urllib.parse.urlencode({"q": query})
         request = urllib.request.Request(
             f"https://www.bing.com/search?{params}",
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0 Safari/537.36"
-                ),
-                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
-            },
+            headers=_browser_headers(),
         )
         with urllib.request.urlopen(request, timeout=SEARCH_TIMEOUT_SECONDS) as response:
             text = response.read().decode("utf-8", errors="replace")
@@ -180,6 +306,18 @@ def _get_json(url: str) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _browser_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+
 def _clean_html(value: str) -> str:
     text = re.sub(r"<.*?>", "", value, flags=re.DOTALL)
-    return html.unescape(text).strip()
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()

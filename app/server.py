@@ -134,7 +134,10 @@ def run(host: str = "127.0.0.1", port: int = 8000):
 
 def _build_classifier(llm_api_key: str | None = None, tavily_api_key: str | None = None):
     return LlmEvidenceClassifier(
-        WebSearchClient(tavily_api_key=tavily_api_key),
+        WebSearchClient(
+            tavily_api_key=tavily_api_key,
+            allow_public_fallback=True,
+        ),
         OpenAICompatibleLlmClient(api_key=llm_api_key),
     )
 
@@ -250,11 +253,11 @@ def _index_html() -> str:
 <body>
   <main>
     <h1>Account Type 清洗工具</h1>
-    <p>上传包含 Account Name 和 Account Type 的 Excel。工具会联网检索 Public Entity 账号的公开信息，并调用 DeepSeek 输出新分类、置信度、原因和证据链接。</p>
+    <p>上传包含 Account Name 和 Account Type 的 Excel。工具会联网检索 Public Entity、Private Equity、Private Equity Investee 或 Account Type 为空白账号的公开信息，并调用 DeepSeek 输出新分类、置信度、原因和证据链接；其他已有 Account Type 会按内置规则本地标准化。未配置或无法使用搜索 API 时，会尝试百度、搜狗、360 的公开网页搜索。</p>
     <section class="panel">
       <label for="apiKey">DeepSeek API Key（仅本次请求使用，不保存）</label>
       <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
-      <label for="tavilyKey">Tavily Search API Key（可选，用于更稳定的联网检索）</label>
+      <label for="tavilyKey">Tavily Search API Key（可选，用于更稳定的联网检索；失败时会继续尝试国内公开搜索）</label>
       <input id="tavilyKey" type="password" autocomplete="off" placeholder="tvly-...">
       <label for="file">选择 Excel 文件（.xlsx / .xlsm）</label>
       <input id="file" type="file" accept=".xlsx,.xlsm">

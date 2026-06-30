@@ -116,12 +116,12 @@ class JobManager:
             job.total = event.get("total", job.total)
             job.processed = event.get("processed", job.processed)
             job.current_account = event.get("current_account", job.current_account)
-            if result and result.account_types == ["Needs Review"]:
+            if result and result.account_type_text:
+                job.success_count += 1
+            if result and result.needs_review:
                 job.needs_review_count += 1
                 if "failed" in result.reason.casefold():
                     job.failure_count += 1
-            elif result:
-                job.success_count += 1
 
     def _get_job(self, job_id: str) -> Job:
         with self._lock:

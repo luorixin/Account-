@@ -6,12 +6,13 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 
 from app.classifier import AccountClassification
 from app.jobs import JobManager
-from app.server import create_server
+from app.server import _build_classifier, create_server
 
 
 class FakeClassifierFactory:
@@ -40,6 +41,32 @@ def workbook_bytes():
 
 
 class ServerJobApiTests(unittest.TestCase):
+    def test_build_classifier_enables_public_search_fallback_without_tavily_key(self):
+        with (
+            patch("app.server.WebSearchClient") as search_client,
+            patch("app.server.OpenAICompatibleLlmClient") as llm_client,
+        ):
+            _build_classifier(llm_api_key="deepseek-test")
+
+        search_client.assert_called_once_with(
+            tavily_api_key=None,
+            allow_public_fallback=True,
+        )
+        llm_client.assert_called_once_with(api_key="deepseek-test")
+
+    def test_build_classifier_keeps_public_search_fallback_with_tavily_key(self):
+        with (
+            patch("app.server.WebSearchClient") as search_client,
+            patch("app.server.OpenAICompatibleLlmClient") as llm_client,
+        ):
+            _build_classifier(llm_api_key="deepseek-test", tavily_api_key="tavily-test")
+
+        search_client.assert_called_once_with(
+            tavily_api_key="tavily-test",
+            allow_public_fallback=True,
+        )
+        llm_client.assert_called_once_with(api_key="deepseek-test")
+
     def test_process_status_and_download_job_flow(self):
         manager = JobManager(FakeClassifierFactory())
         server = create_server("127.0.0.1", 0, job_manager=manager)
